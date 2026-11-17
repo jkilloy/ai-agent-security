@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-callsec}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-callsec}
+      POSTGRES_DB: ${POSTGRES_DB:-callsec}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  core:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${CORE_PORT:-8080}:8080"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-callsec}:${POSTGRES_PASSWORD:-callsec}@postgres:5432/${POSTGRES_DB:-callsec}?sslmode=disable
+      AUDIO_DIR: /data/audio
+      RETENTION: ${RETENTION:-720h}
+      CLEANUP_INTERVAL: ${CLEANUP_INTERVAL:-1h}
+      PLUGIN_TIMEOUT: ${PLUGIN_TIMEOUT:-30s}
+      FIRST_MESSAGE_TIMEOUT: ${FIRST_MESSAGE_TIMEOUT:-10s}
+      MAX_CALL_DURATION: ${MAX_CALL_DURATION:-4h}
+      MAX_FRAME_BYTES: ${MAX_FRAME_BYTES:-1048576}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - audio:/data/audio
+    stop_grace_period: 90s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  audio:
