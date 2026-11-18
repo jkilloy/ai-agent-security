@@ -94,10 +94,6 @@ func (f *fakeStore) List(_ context.Context, q store.ListQuery) ([]call.Call, err
 	return f.calls[:min(len(f.calls), q.Limit)], nil
 }
 
-func (f *fakeStore) Stats(context.Context) (store.Stats, error) {
-	return store.Stats{Total: int64(len(f.calls))}, nil
-}
-
 const id1 = "11111111-1111-1111-1111-111111111111"
 const id2 = "22222222-2222-2222-2222-222222222222"
 
@@ -138,7 +134,7 @@ func TestUIAndAPI(t *testing.T) {
 
 	r := get(t, srv.URL+"/admin/", nil)
 	body, _ := io.ReadAll(r.Body)
-	if r.StatusCode != 200 || !strings.Contains(string(body), "Call review") {
+	if r.StatusCode != 200 || !strings.Contains(string(body), "<title>Calls</title>") {
 		t.Fatalf("ui: %d", r.StatusCode)
 	}
 	if !strings.Contains(r.Header.Get("Content-Security-Policy"), "script-src 'self'") {
@@ -149,13 +145,13 @@ func TestUIAndAPI(t *testing.T) {
 	}
 
 	// Paging: limit 1 returns a cursor that decodes back to the last call.
-	r = get(t, srv.URL+"/api/calls?limit=1&q=caller&verdict=flagged", nil)
+	r = get(t, srv.URL+"/api/calls?limit=1&q=caller&errors=1", nil)
 	var page struct {
 		Calls []call.Call `json:"calls"`
 		Next  string      `json:"next"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&page)
-	if len(page.Calls) != 1 || page.Next == "" || fs.last.Search != "caller" || fs.last.Verdict != "flagged" {
+	if len(page.Calls) != 1 || page.Next == "" || fs.last.Search != "caller" || !fs.last.Errors {
 		t.Fatalf("page = %+v last = %+v", page, fs.last)
 	}
 	get(t, srv.URL+"/api/calls?before="+page.Next, nil)
@@ -164,12 +160,11 @@ func TestUIAndAPI(t *testing.T) {
 	}
 
 	for path, want := range map[string]int{
-		"/api/calls?verdict=bogus":     400,
+		"/api/calls?errors=maybe":      400,
 		"/api/calls?before=zz!!":       400,
 		"/api/calls/not-a-uuid":        400,
 		"/api/calls/" + id1:            200,
 		"/api/calls/" + id2 + "/audio": 422, // no encoding in variables
-		"/api/stats":                   200,
 	} {
 		if r := get(t, srv.URL+path, nil); r.StatusCode != want {
 			t.Errorf("%s = %d, want %d", path, r.StatusCode, want)
@@ -190,12 +185,12 @@ func TestUIAndAPI(t *testing.T) {
 
 func TestBasicAuth(t *testing.T) {
 	srv, _ := setup(t, Options{User: "admin", Password: "s3cret"})
-	for _, p := range []string{"/admin/", "/api/stats", "/api/calls", "/api/calls/" + id1 + "/audio"} {
+	for _, p := range []string{"/admin/", "/api/calls/" + id1, "/api/calls", "/api/calls/" + id1 + "/audio"} {
 		if r := get(t, srv.URL+p, nil); r.StatusCode != 401 || r.Header.Get("WWW-Authenticate") == "" {
 			t.Errorf("%s without auth = %d", p, r.StatusCode)
 		}
 	}
-	req, _ := http.NewRequest("GET", srv.URL+"/api/stats", nil)
+	req, _ := http.NewRequest("GET", srv.URL+"/api/calls", nil)
 	req.SetBasicAuth("admin", "wrong")
 	if r, _ := http.DefaultClient.Do(req); r.StatusCode != 401 {
 		t.Errorf("wrong password = %d", r.StatusCode)

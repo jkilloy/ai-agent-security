@@ -14,7 +14,7 @@ import (
 
 // Runs against a real Postgres when TEST_DATABASE_URL is set, e.g.
 // TEST_DATABASE_URL=postgres://callsec:callsec@localhost:5432/callsec_test?sslmode=disable
-func TestPostgresListAndStats(t *testing.T) {
+func TestPostgresList(t *testing.T) {
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("TEST_DATABASE_URL not set")
@@ -73,9 +73,7 @@ func TestPostgresListAndStats(t *testing.T) {
 		}
 	}
 	eq("all newest first", list(ListQuery{}), []string{wm, syn, clean, old})
-	eq("flagged", list(ListQuery{Verdict: FilterFlagged}), []string{wm, syn})
-	eq("errors", list(ListQuery{Verdict: FilterErrors}), []string{clean})
-	eq("verdict", list(ListQuery{Verdict: "no_evidence"}), []string{clean})
+	eq("errors", list(ListQuery{Errors: true}), []string{clean})
 	eq("search var", list(ListQuery{Search: "550002"}), []string{syn})
 	eq("search escapes wildcards", list(ListQuery{Search: "100%_"}), []string{clean})
 	eq("search id prefix", list(ListQuery{Search: wm[:8]}), []string{wm})
@@ -83,12 +81,4 @@ func TestPostgresListAndStats(t *testing.T) {
 	eq("page 1", first, []string{wm, syn})
 	c2, _ := db.Get(ctx, syn)
 	eq("page 2", list(ListQuery{Limit: 2, BeforeTime: c2.StartedAt, BeforeID: c2.ID}), []string{clean, old})
-
-	s, err := db.Stats(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.Total != 4 || s.Last24h != 3 || s.Flagged != 2 || s.Errors != 1 || s.Verdicts["watermark_detected"] != 1 {
-		t.Fatalf("stats = %+v", s)
-	}
 }
