@@ -1,0 +1,23 @@
+# Base runtime for the detector service. These are pinned in the image;
+# the updater only tracks the detector packages and models in catalog.yaml.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.11.0
+torchaudio==2.11.0  # Perth needs torchaudio; 2.11 is its last release, so torch is held to match
+transformers==5.23.0
+numpy==2.5.5
+scipy==1.18.1
+fastapi==0.163.1
+uvicorn[standard]==0.54.0
+httpx==0.28.1
+PyYAML==6.0.3
+huggingface-hub==2.4.0
+safetensors
+omegaconf==2.4.0
+einops==0.8.2
+realitydefender==0.1.14
+librosa==1.0.1
+setuptools<81  # Perth imports pkg_resources
+# Initial ("release 0") versions of the tracked detector packages.
+pytest==9.2.0  # for the in-image test suite
+audioseal==0.2.1
+resemble-perth==1.0.1

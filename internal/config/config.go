@@ -19,6 +19,8 @@ type Config struct {
 	MaxCallDuration     time.Duration
 	MaxFrameBytes       int64
 	ShutdownTimeout     time.Duration
+	AdminUser           string
+	AdminPassword       string
 }
 
 func Load() (Config, error) {
@@ -26,6 +28,9 @@ func Load() (Config, error) {
 		ListenAddr:  getStr("LISTEN_ADDR", ":8080"),
 		DatabaseURL: os.Getenv("DATABASE_URL"),
 		AudioDir:    getStr("AUDIO_DIR", "/data/audio"),
+
+		AdminUser:     getStr("ADMIN_USER", "admin"),
+		AdminPassword: os.Getenv("ADMIN_PASSWORD"),
 	}
 	var err error
 	durations := []struct {

@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"agent-security/internal/admin"
 	"agent-security/internal/config"
 	"agent-security/internal/engine"
 	"agent-security/internal/plugin"
@@ -63,14 +64,21 @@ func run(log *slog.Logger) error {
 		(&retention.Cleaner{Store: db, Interval: cfg.CleanupInterval, Log: log}).Run(cleanCtx)
 	}()
 
+	mux := http.NewServeMux()
+	mux.Handle("/", srv.Handler())
+	admin.New(db, admin.Options{User: cfg.AdminUser, Password: cfg.AdminPassword}, log).Register(mux)
+	if cfg.AdminPassword == "" {
+		log.Warn("admin UI has no password; set ADMIN_PASSWORD before exposing this service")
+	}
+
 	httpSrv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           srv.Handler(),
+		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("listening", "addr", cfg.ListenAddr, "retention", cfg.Retention.String())
+		log.Info("listening", "addr", cfg.ListenAddr, "retention", cfg.Retention.String(), "admin_ui", "/admin/")
 		errCh <- httpSrv.ListenAndServe()
 	}()
 

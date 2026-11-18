@@ -1,0 +1,40 @@
+# Detectors the service runs, and the upstream sources the updater tracks.
+#
+# The updater checks the PyPI `package` and the Hugging Face `model` /
+# `weights_repo` of every entry on each update cycle. When any of them has a
+# newer release it builds a new detector release with those versions, runs
+# the self-tests, and switches over only if they pass.
+#
+# kind:     watermark | synthetic_speech
+# adapter:  code that runs the detector (detsvc/detectors/). New Hugging Face
+#           audio-classification models need no code: add another
+#           `hf_audio_classifier` entry.
+# threshold: per-window score at or above which a window counts as positive.
+# stride / max_windows: run on every Nth speech window, at most N per channel
+#           (for slow models).
+
+detectors:
+  - id: audioseal
+    kind: watermark
+    adapter: audioseal
+    package: audioseal
+    weights_repo: facebook/audioseal
+    threshold: 0.5
+    options:
+      detector_card: audioseal_detector_16bits
+      generator_card: audioseal_wm_16bits   # used only by the self-test
+
+  - id: perth
+    kind: watermark
+    adapter: perth
+    package: resemble-perth
+    threshold: 0.8          # clean speech scores ~0.3, watermarked ~1.0
+
+  - id: wav2vec2-deepfake
+    kind: synthetic_speech
+    adapter: hf_audio_classifier
+    model: garystafford/wav2vec2-deepfake-voice-detector
+    synthetic_labels: [fake]
+    threshold: 0.7
+    stride: 2
+    max_windows: 15

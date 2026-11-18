@@ -26,16 +26,48 @@ services:
       AUDIO_DIR: /data/audio
       RETENTION: ${RETENTION:-720h}
       CLEANUP_INTERVAL: ${CLEANUP_INTERVAL:-1h}
-      PLUGIN_TIMEOUT: ${PLUGIN_TIMEOUT:-30s}
+      PLUGIN_TIMEOUT: ${PLUGIN_TIMEOUT:-75s}
       FIRST_MESSAGE_TIMEOUT: ${FIRST_MESSAGE_TIMEOUT:-10s}
       MAX_CALL_DURATION: ${MAX_CALL_DURATION:-4h}
       MAX_FRAME_BYTES: ${MAX_FRAME_BYTES:-1048576}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Admin UI at /admin/. Set a password before exposing this port.
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # aivoice plugin: AI-voice watermark / synthetic-speech detection
+      AIVOICE_URL: ws://detectors:8000/v1/stream
+      AIVOICE_DEFAULT_ENCODING: ${AIVOICE_DEFAULT_ENCODING:-}
+      AIVOICE_DEFAULT_SAMPLE_RATE: ${AIVOICE_DEFAULT_SAMPLE_RATE:-}
     volumes:
       - audio:/data/audio
     stop_grace_period: 90s
     restart: unless-stopped
 
+  detectors:
+    build: ./detectors
+    environment:
+      WORKERS: ${DETECTOR_WORKERS:-2}
+      TORCH_THREADS: ${DETECTOR_TORCH_THREADS:-2}
+      WINDOW_SECONDS: ${DETECTOR_WINDOW_SECONDS:-4}
+      FINISH_TIMEOUT: ${DETECTOR_FINISH_TIMEOUT:-40s}
+      UPDATE_ENABLED: ${DETECTOR_UPDATE_ENABLED:-true}
+      UPDATE_INTERVAL: ${DETECTOR_UPDATE_INTERVAL:-24h}
+      CATALOG_URL: ${DETECTOR_CATALOG_URL:-}
+      # Optional commercial APIs. Setting a key sends call audio to that vendor.
+      RESEMBLE_API_KEY: ${RESEMBLE_API_KEY:-}
+      REALITY_DEFENDER_API_KEY: ${REALITY_DEFENDER_API_KEY:-}
+      API_MAX_SECONDS: ${DETECTOR_API_MAX_SECONDS:-60}
+    volumes:
+      - detectors:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 180s
+      retries: 3
+    restart: unless-stopped
+
 volumes:
   pgdata:
   audio:
+  detectors:

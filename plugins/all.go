@@ -4,5 +4,6 @@
 package plugins
 
 import (
+	_ "agent-security/plugins/aivoice"
 	_ "agent-security/plugins/audiostats"
 )
