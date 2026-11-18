@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"agent-security/internal/audio"
 	"agent-security/internal/plugin"
@@ -108,5 +109,90 @@ func TestServiceRejectsOrIsDown(t *testing.T) {
 	_, err = run(t, &Plugin{URL: "ws://127.0.0.1:1/v1/stream"}, map[string]any{"encoding": "pcm16", "sample_rate": float64(8000)})
 	if err == nil || !strings.Contains(err.Error(), "connect") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// The detector service (uvicorn) pings every 20 s and closes the connection if
+// no pong arrives. The client only answers pings while it is reading, so it
+// must read for the whole call, not just after sending "end".
+func TestAnswersPingsDuringLongCalls(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		ctx := r.Context()
+		if _, _, err := c.Read(ctx); err != nil {
+			return
+		}
+		_ = c.Write(ctx, websocket.MessageText, []byte(`{"type":"ready","release":"base"}`))
+		go func() { // like uvicorn: ping, and drop the connection if there's no pong
+			pctx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+			defer cancel()
+			if err := c.Ping(pctx); err != nil {
+				c.Close(websocket.StatusPolicyViolation, "keepalive ping timeout")
+			}
+		}()
+		n := 0
+		for {
+			typ, data, err := c.Read(ctx)
+			if err != nil {
+				return
+			}
+			if typ != websocket.MessageBinary {
+				break
+			}
+			n += len(data)
+		}
+		rep, _ := json.Marshal(map[string]any{"type": "report", "report": map[string]any{"bytes": n}})
+		_ = c.Write(ctx, websocket.MessageText, rep)
+	}))
+	t.Cleanup(srv.Close)
+
+	b := audio.NewBroadcaster(nil)
+	in := &plugin.Input{CallID: "c", Variables: map[string]any{"encoding": "mulaw", "sample_rate": float64(8000)}, Audio: b.Subscribe()}
+	go func() { // a call that outlasts the ping timeout
+		_ = b.Publish([]byte("ab"))
+		time.Sleep(800 * time.Millisecond)
+		_ = b.Publish([]byte("cd"))
+		b.Close()
+	}()
+	out, err := (&Plugin{URL: wsURL(srv)}).Analyze(context.Background(), in)
+	if err != nil || string(out) != `{"bytes":4}` {
+		t.Fatalf("out = %s, err = %v", out, err)
+	}
+}
+
+// If the service ends the session mid-call, its reason is returned, not a
+// write error such as "broken pipe".
+func TestServiceErrorMidCall(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		ctx := r.Context()
+		_, _, _ = c.Read(ctx)
+		_ = c.Write(ctx, websocket.MessageText, []byte(`{"type":"ready","release":"base"}`))
+		_, _, _ = c.Read(ctx) // first audio frame
+		_ = c.Write(ctx, websocket.MessageText, []byte(`{"type":"error","error":"RuntimeError: worker died"}`))
+		c.Close(websocket.StatusInternalError, "")
+	}))
+	t.Cleanup(srv.Close)
+
+	b := audio.NewBroadcaster(nil)
+	in := &plugin.Input{CallID: "c", Variables: map[string]any{"encoding": "mulaw", "sample_rate": float64(8000)}, Audio: b.Subscribe()}
+	go func() {
+		for range 50 {
+			_ = b.Publish([]byte("abcd"))
+			time.Sleep(10 * time.Millisecond)
+		}
+		b.Close()
+	}()
+	_, err := (&Plugin{URL: wsURL(srv)}).Analyze(context.Background(), in)
+	if err == nil || !strings.Contains(err.Error(), "worker died") {
+		t.Fatalf("err = %v", err)
 	}
 }

@@ -116,6 +116,16 @@ func (p *Plugin) Analyze(ctx context.Context, in *plugin.Input) (json.RawMessage
 		return nil, fmt.Errorf("detector service rejected call: %s", ready.Error)
 	}
 
+	// Keep reading for the whole session. The WebSocket library answers the
+	// service's keepalive pings only while a Read is in progress (uvicorn pings
+	// every 20 s and drops the connection after 20 s without a pong), and the
+	// service may end the session early with an error message.
+	replies := make(chan reply, 1)
+	go func() {
+		m, err := readMsg(ctx, conn)
+		replies <- reply{m, err}
+	}()
+
 	for {
 		frame, err := in.Audio.Next(ctx)
 		if errors.Is(err, io.EOF) {
@@ -125,22 +135,44 @@ func (p *Plugin) Analyze(ctx context.Context, in *plugin.Input) (json.RawMessage
 			return nil, err
 		}
 		if err := conn.Write(ctx, websocket.MessageBinary, frame); err != nil {
-			return nil, fmt.Errorf("stream audio: %w", err)
+			return nil, sessionEnded(replies, fmt.Errorf("stream audio: %w", err))
 		}
 	}
 
 	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"end"}`)); err != nil {
-		return nil, fmt.Errorf("send end: %w", err)
+		return nil, sessionEnded(replies, fmt.Errorf("send end: %w", err))
 	}
-	res, err := readMsg(ctx, conn)
-	if err != nil {
-		return nil, fmt.Errorf("waiting for report: %w", err)
+	r := <-replies
+	if r.err != nil {
+		return nil, fmt.Errorf("waiting for report: %w", r.err)
 	}
+	res := r.msg
 	if res.Type != "report" || len(res.Report) == 0 {
 		return nil, fmt.Errorf("detector service error: %s", res.Error)
 	}
 	conn.Close(websocket.StatusNormalClosure, "")
 	return res.Report, nil
+}
+
+type reply struct {
+	msg serviceMsg
+	err error
+}
+
+// sessionEnded explains a failed write: if the service sent a reason before
+// closing the connection, that is more useful than the write error.
+func sessionEnded(replies <-chan reply, writeErr error) error {
+	select {
+	case r := <-replies:
+		if r.err == nil && r.msg.Error != "" {
+			return fmt.Errorf("detector service ended the session: %s", r.msg.Error)
+		}
+		if r.err != nil {
+			return fmt.Errorf("%w (connection: %v)", writeErr, r.err)
+		}
+	case <-time.After(time.Second):
+	}
+	return writeErr
 }
 
 func readMsg(ctx context.Context, conn *websocket.Conn) (serviceMsg, error) {
