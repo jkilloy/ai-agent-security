@@ -21,6 +21,7 @@ Requirements: Docker with Compose v2. Go 1.25+ is needed only for `streamcall` a
 
 ```sh
 cp .env.example .env              # then edit: at least POSTGRES_PASSWORD and ADMIN_PASSWORD
+                                  # (set POSTGRES_PASSWORD before the first `up`: it only applies to a new volume)
 docker compose up -d --build      # the first build downloads the detector models (~2 GB) and self-tests them
 docker compose ps                 # wait until detectors is "healthy" (up to ~3 min on first start)
 
@@ -250,5 +251,6 @@ End-to-end smoke test: bring the stack up, stream a watermarked sample (see [Run
 | No `complete` message | The client timed out before the plugins finished, or the client closed first | Read timeout above `PLUGIN_TIMEOUT` |
 | Every plugin result is `{"error":"timed out…"}` | `PLUGIN_TIMEOUT` too short for the slowest plugin | Raise it, keeping the [timeout chain](#timeouts-that-must-line-up) in order |
 | Core exits at startup with `connect to database` | Postgres not reachable within 30 s | Check `DATABASE_URL` and the Postgres health. Compose restarts the core. |
+| Postgres logs `password authentication failed for user "callsec"` and the core keeps restarting | `POSTGRES_PASSWORD` was changed after the `pgdata` volume was created. Postgres sets the password only when it first creates the volume. | Keep your data and set the new password: `docker compose exec -T postgres psql -U callsec -d callsec -c "ALTER ROLE callsec PASSWORD '<new password>'"`, then `docker compose up -d`. Or delete everything: `docker compose down -v`. |
 | Calls missing after a core crash | In-flight calls are only saved at the end | Known limitation ([architecture.md §13](architecture.md#13-future-work)) |
 | Browser connection to `/ws/call` gets 403 | Cross-origin browser connection rejected | Connect from a server, or from a page served by the same host |
