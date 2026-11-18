@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import subprocess
@@ -86,12 +87,20 @@ class Worker:
 
 class Pool:
     """Runs analysis requests on N workers of one release. Sessions hold a
-    reference so a pool replaced by an update is closed only when drained."""
+    reference so a pool replaced by an update is closed only when drained.
+
+    Requests wait in a priority queue and are never dropped. The priority a
+    session passes is (job, channel, position): calls are analyzed in the order
+    they started, and within a call channel 0 before channel 1, oldest audio
+    first. A later call's windows run only when no earlier call has any queued.
+    """
 
     def __init__(self, release: Release, app_dir: Path, size: int, threads: int):
         self.release = release
         self.workers = [Worker(release, app_dir, threads, f"{release.id}/{i}") for i in range(size)]
-        self.queue: asyncio.Queue = asyncio.Queue()
+        self.queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
+        self._seq = itertools.count()   # tie-breaker: FIFO within one priority
+        self._jobs = itertools.count()
         self.tasks: list[asyncio.Task] = []
         self.refs = 0
         self.retired = False
@@ -108,7 +117,7 @@ class Pool:
 
     async def _run(self, w: Worker) -> None:
         while True:
-            header, payload, fut = await self.queue.get()
+            _, _, header, payload, fut = await self.queue.get()
             if fut.cancelled():
                 continue
             try:
@@ -119,9 +128,18 @@ class Pool:
                 if not fut.cancelled():
                     fut.set_exception(e)
 
-    async def analyze(self, x: np.ndarray, detectors: list[str]) -> dict:
+    def next_job(self) -> int:
+        """A job number for a new call; lower numbers are analyzed first."""
+        return next(self._jobs)
+
+    @property
+    def queued(self) -> int:
+        return self.queue.qsize()
+
+    async def analyze(self, x: np.ndarray, detectors: list[str], priority: tuple = ()) -> dict:
         fut = asyncio.get_running_loop().create_future()
-        await self.queue.put(({"op": "analyze", "detectors": detectors}, x.astype("<f4").tobytes(), fut))
+        item = (priority, next(self._seq), {"op": "analyze", "detectors": detectors}, x.astype("<f4").tobytes(), fut)
+        await self.queue.put(item)
         res = await fut
         if res.get("type") != "result":
             raise WorkerError(res.get("error", "analysis failed"))

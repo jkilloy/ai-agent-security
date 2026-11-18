@@ -66,7 +66,7 @@ All configuration is through environment variables. Compose reads overrides from
 | `AUDIO_DIR` | `/data/audio` | Where `<call_id>.raw` files are written. Created with mode 0700 if missing. |
 | `RETENTION` | `720h` | How long a call is kept after it ends (Go duration: `90m`, `72h`, `2160h`) |
 | `CLEANUP_INTERVAL` | `1h` | How often expired calls are deleted. Must be positive. |
-| `PLUGIN_TIMEOUT` | `30s` (Compose: `75s`) | How long plugins may run after the audio ends. With `aivoice` it must be more than the detector service's `FINISH_TIMEOUT` + `API_TIMEOUT`. |
+| `PLUGIN_TIMEOUT` | `30s` (Compose: `30m`) | How long plugins may run after the audio ends. With `aivoice` it must cover the longest time a call's analysis can wait in the detector queue. |
 | `FIRST_MESSAGE_TIMEOUT` | `10s` | Upgrade → variables message |
 | `MAX_CALL_DURATION` | `4h` | Longest call. Longer calls are ended and saved. |
 | `MAX_FRAME_BYTES` | `1048576` | Largest WebSocket message |
@@ -89,7 +89,7 @@ All configuration is through environment variables. Compose reads overrides from
 
 ### Detector service
 
-See [detectors/README.md § Configuration](../detectors/README.md#configuration): `WORKERS`, `TORCH_THREADS`, `WINDOW_SECONDS`, `SILENCE_RMS`, `MAX_BACKLOG_WINDOWS`, `FINISH_TIMEOUT`, `UPDATE_ENABLED`, `UPDATE_INTERVAL`, `CATALOG_URL`, `RELEASES_KEEP`, `API_MAX_SECONDS` and `API_TIMEOUT`.
+See [detectors/README.md § Configuration](../detectors/README.md#configuration): `WORKERS`, `TORCH_THREADS`, `WINDOW_SECONDS`, `SILENCE_RMS`, `FINISH_TIMEOUT`, `UPDATE_ENABLED`, `UPDATE_INTERVAL`, `CATALOG_URL`, `RELEASES_KEEP`, `API_MAX_SECONDS` and `API_TIMEOUT`.
 
 ### Timeouts that must line up
 
@@ -97,12 +97,15 @@ Each timeout in this chain must be shorter than the one after it:
 
 | Inner | must be shorter than | Outer | Defaults (Compose) |
 |---|---|---|---|
-| detector `FINISH_TIMEOUT` + `API_TIMEOUT` | < | core `PLUGIN_TIMEOUT` | 40s + 25s < 75s |
-| core `PLUGIN_TIMEOUT` + ~10s to save | < | core `SHUTDOWN_TIMEOUT` | 75s + 10s vs **60s** |
+| detector queue wait (+ `API_TIMEOUT` if APIs are on) | < | core `PLUGIN_TIMEOUT` | unbounded (`FINISH_TIMEOUT=0`) < 30m |
 | core `SHUTDOWN_TIMEOUT` | < | container `stop_grace_period` | 60s < 90s |
-| core `PLUGIN_TIMEOUT` | < | client's read timeout for `complete` | 75s < your value |
+| client's read timeout for `complete` | ≥ | the time until results are saved | your value |
 
-The defaults break the second rule. A call that ends at the moment of shutdown may need the full 75 s `PLUGIN_TIMEOUT`, but shutdown waits only 60 s. In practice plugins finish within seconds of the audio ending, so this rarely matters. To guarantee clean shutdowns, set `SHUTDOWN_TIMEOUT=85s` and keep `stop_grace_period` above it.
+**The detector service never drops work, so results can lag.** Each call's AI-voice analysis waits behind earlier calls in the detector queue, and the core saves a call only once every plugin has returned. With enough hardware this is seconds; after a busy period it can be minutes. Three consequences:
+
+- `PLUGIN_TIMEOUT` caps the wait. A call still queued after 30 minutes is saved with `results.aivoice = {"error": "timed out…"}`.
+- Clients waiting for `complete` wait for the analysis too. Either hang up after sending `end` (the call is still saved), or set a long read timeout.
+- **Shutdown waits only `SHUTDOWN_TIMEOUT` (60 s).** Calls whose analysis is still queued at that point are lost, so drain traffic before restarting the core.
 
 ## Deploying
 
@@ -168,7 +171,7 @@ Audio bit rates:
 
 Disk needed ≈ calls per day × average call length × bit rate × retention in days. For example, 1,000 five-minute mono mulaw calls a day kept for 30 days is 1000 × 300 s × 8 KB/s × 30 ≈ **72 GB**. Postgres adds about 1–5 KB per call.
 
-**Detector throughput.** Each speech window (4 s per channel) runs the watermark detectors, and every second window runs the wav2vec2 classifier, at most 15 per channel. On CPU the classifier takes about 1–5 s per window, and the watermark detectors less. To keep up in real time you need roughly `concurrent channels × (work seconds per window ÷ 4 s)` workers. Measure on your hardware: stream a real-time-paced call (`-interval 20ms`), and check that `windows.skipped_backlog` stays 0 and no "did not finish" caveat appears. Increase `DETECTOR_WORKERS` and CPU until it does. Each worker is a separate process that holds every model in memory, so check the memory per worker with `docker stats` before adding more.
+**Detector throughput.** Each speech window (4 s per channel) runs the watermark detectors, and every second window runs the wav2vec2 classifier, at most 15 per channel. On CPU the classifier takes about 1–5 s per window, and the watermark detectors less. To keep up in real time you need roughly `concurrent channels × (work seconds per window ÷ 4 s)` workers. Nothing is dropped when the hardware falls behind; reports just arrive later. Measure on your hardware: stream real-time-paced calls (`-interval 20ms`) at your expected concurrency, and watch `analysis.seconds_after_call` in the reports. If it keeps growing, the queue isn't draining. Increase `DETECTOR_WORKERS` and CPU until it stays at a few seconds. Each worker is a separate process that holds every model in memory, so check the memory per worker with `docker stats` before adding more.
 
 ## Logs and monitoring
 
@@ -198,8 +201,8 @@ What to alert on:
 
 - any `save call` error;
 - `plugin failed` rate by plugin;
-- `/api/stats` `errors` growing;
-- detector `skipped_backlog` above 0, or "did not finish" caveats (visible in the reports);
+- calls with plugin errors (`/api/calls?errors=1`) appearing;
+- growing `analysis.seconds_after_call` in AI-voice reports (the detector queue isn't keeping up);
 - disk usage of the audio volume;
 - `/healthz` failures.
 
@@ -233,7 +236,7 @@ docker build -t agent-security-detectors detectors
 docker run --rm agent-security-detectors python -m pytest -q tests
 ```
 
-End-to-end smoke test: bring the stack up, stream a watermarked sample (see [Running locally](#running-locally)), and confirm in the admin UI that the call shows "AudioSeal watermark found" and that the audio plays.
+End-to-end smoke test: bring the stack up, stream a watermarked sample (see [Running locally](#running-locally)), and confirm on the call's admin page that `results.aivoice.verdict` is `watermark_detected` and that the recording plays.
 
 ## Troubleshooting
 
@@ -244,7 +247,8 @@ End-to-end smoke test: bring the stack up, stream a watermarked sample (see [Run
 | `results.aivoice = {"error":"connect to detector service: …"}` | The detector service is down or still starting | `docker compose ps`, `docker compose logs detectors`. On first start it needs up to ~3 min. |
 | `results.aivoice = {"error":"detector service rejected call: unsupported encoding …"}` | Unknown encoding name | Use `mulaw`, `alaw`, `pcm16`, `f32le` or `u8` |
 | `aivoice` missing from results entirely | `AIVOICE_URL` unset | Check the `plugins loaded` log line |
-| Report caveat "N analysis windows did not finish within 40s" or `skipped_backlog` > 0 | The detector service can't keep up | More `DETECTOR_WORKERS` or CPU, or pace recorded audio in real time |
+| Calls take minutes to appear after hanging up; large `analysis.seconds_after_call` | The detector queue is behind; calls wait their turn | More `DETECTOR_WORKERS` or CPU |
+| `results.aivoice = {"error":"timed out…"}` | The call's analysis was still queued after `PLUGIN_TIMEOUT` | More detector capacity, or a longer `PLUGIN_TIMEOUT` |
 | Audio plays as loud noise | Wrong encoding or byte order (big-endian L16 sent as `pcm16`, or mulaw labeled `pcm16`) | Fix the variables or byte-swap at the source |
 | Audio plays too fast or slow, or at the wrong pitch | Wrong `sample_rate` or `channels` | Fix the variables |
 | Player says the call can't be played (422) | The variables don't describe the format | Send `encoding` and `sample_rate` |

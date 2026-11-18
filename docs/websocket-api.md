@@ -355,7 +355,7 @@ After `accepted`, send the audio described in §4 as **binary** WebSocket messag
 ### 6.2 Pacing
 
 - **Live calls:** send audio as you receive it, about one message every 20 ms. Don't buffer the whole call.
-- **Recorded files:** you can send faster than real time, but analysis has a real-time budget. The detector service analyzes 4-second windows on a fixed worker pool. If windows arrive much faster than they can be processed, more than `MAX_BACKLOG_WINDOWS` (30) are queued and later windows are skipped and counted in `windows.skipped_backlog`. To analyze every window of a recording, pace it at about real time (`streamcall -interval 20ms -chunk 320` for 8 kHz stereo μ-law), or add detector workers.
+- **Recorded files:** you can send faster than real time. Every window is still analyzed: the detector service queues the work, so the call's results simply arrive later.
 - The core applies no backpressure of its own, apart from TCP flow control. Every plugin has an unbounded in-memory queue, so a slow plugin never slows the sender.
 
 ### 6.3 Other text messages
@@ -371,7 +371,7 @@ There are two ways to end a call, and both save it:
 | **Graceful:** send text `{"type":"end"}`, then wait for `complete` | The core closes the audio stream, waits for the plugins, saves, sends `{"type":"complete","call_id":…}`, and closes with 1000. | Use this when you want confirmation that the results are stored before you move on. |
 | **Hangup:** close or drop the socket | The core treats it as the end of the audio. Plugins still run to completion and the call is still saved. The client just doesn't see `complete`. | Use this on abrupt disconnects, or if you don't care about confirmation. |
 
-How long `complete` takes: plugins get up to `PLUGIN_TIMEOUT` after the audio ends. That is 30 s by default, and Docker Compose sets 75 s because the AI-voice detectors may still be working through queued windows. In practice it usually takes a few seconds. **Set your client's read timeout for `complete` above `PLUGIN_TIMEOUT`**, for example 2 minutes.
+How long `complete` takes: the core saves the call once every plugin has returned, and `aivoice` returns only when the detector service has analyzed every window of both channels. Its work is queued behind earlier calls and never dropped. With enough detector capacity this takes a few seconds. When the queue is long it can take minutes, up to `PLUGIN_TIMEOUT` (30 s by default, 30 min in Compose). **Either hang up after sending `end`** (the call is saved anyway; fetch the results later), **or set a read timeout that matches your detector capacity.**
 
 Calls also end without a client action:
 
@@ -434,7 +434,7 @@ All are environment variables on the core (see [operations.md](operations.md#con
 | `FIRST_MESSAGE_TIMEOUT` | 10s | Upgrade → first message |
 | `MAX_FRAME_BYTES` | 1048576 | Every incoming message, including the first |
 | `MAX_CALL_DURATION` | 4h | Measured from the upgrade |
-| `PLUGIN_TIMEOUT` | 30s (75s in Compose) | Audio end → all plugins finished |
+| `PLUGIN_TIMEOUT` | 30s (30m in Compose) | Audio end → all plugins finished |
 | `SHUTDOWN_TIMEOUT` | 60s | Shutdown waiting for in-flight calls |
 
 There is no idle timeout during the audio phase. A connected client that sends nothing keeps the call open until `MAX_CALL_DURATION`. TCP keepalive and any proxy timeouts apply.
@@ -699,7 +699,7 @@ This bridge sends the caller only. To analyze both sides, start the stream with 
 
 ### 13.3 Recorded calls (batch)
 
-For call recordings, stream each file with real-time pacing, or use a large `DETECTOR_WORKERS` count and accept backlog skips. Put the recording's metadata in the first message, including the original call start time, because the core's `started_at` is when the upload began.
+For call recordings, stream each file as fast as you like: the analysis is queued and every window is analyzed. Put the recording's metadata in the first message, including the original call start time, because the core's `started_at` is when the upload began.
 
 ## 14. Integration checklist
 
@@ -711,7 +711,7 @@ For call recordings, stream each file with real-time pacing, or use a large `DET
 - [ ] Audio is sent as **binary** frames of raw samples: no WAV or RTP headers, no base64, and `pcm16` little-endian.
 - [ ] Messages are whole frames, about 20 ms each (320 bytes for stereo 8 kHz μ-law), and always under `MAX_FRAME_BYTES`.
 - [ ] Silence and lost packets are filled with silence samples, so the audio length matches real time and both channels stay aligned.
-- [ ] The call ends with `{"type":"end"}`, and the client waits for `complete` with a timeout above `PLUGIN_TIMEOUT`, or knowingly relies on hangup.
+- [ ] The call ends with `{"type":"end"}`. Then either hang up and fetch the results later, or wait for `complete` with a timeout that allows for the detector queue.
 - [ ] Connection failures never affect the real phone call.
 - [ ] The connection runs over a private network or an authenticating TLS proxy.
 - [ ] One test call has been checked in the admin UI: the audio plays at the right speed and pitch, each side is on the correctly labeled channel, and the call length matches the real call.

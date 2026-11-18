@@ -26,7 +26,9 @@ services:
       AUDIO_DIR: /data/audio
       RETENTION: ${RETENTION:-720h}
       CLEANUP_INTERVAL: ${CLEANUP_INTERVAL:-1h}
-      PLUGIN_TIMEOUT: ${PLUGIN_TIMEOUT:-75s}
+      # How long plugins may run after a call ends. aivoice waits here while its
+      # analysis is queued behind earlier calls, so keep this generous.
+      PLUGIN_TIMEOUT: ${PLUGIN_TIMEOUT:-30m}
       FIRST_MESSAGE_TIMEOUT: ${FIRST_MESSAGE_TIMEOUT:-10s}
       MAX_CALL_DURATION: ${MAX_CALL_DURATION:-4h}
       MAX_FRAME_BYTES: ${MAX_FRAME_BYTES:-1048576}
@@ -49,7 +51,7 @@ services:
       WORKERS: ${DETECTOR_WORKERS:-2}
       TORCH_THREADS: ${DETECTOR_TORCH_THREADS:-2}
       WINDOW_SECONDS: ${DETECTOR_WINDOW_SECONDS:-4}
-      FINISH_TIMEOUT: ${DETECTOR_FINISH_TIMEOUT:-40s}
+      FINISH_TIMEOUT: ${DETECTOR_FINISH_TIMEOUT:-0}   # 0 = analyze every window, however long it takes
       UPDATE_ENABLED: ${DETECTOR_UPDATE_ENABLED:-true}
       UPDATE_INTERVAL: ${DETECTOR_UPDATE_INTERVAL:-24h}
       CATALOG_URL: ${DETECTOR_CATALOG_URL:-}

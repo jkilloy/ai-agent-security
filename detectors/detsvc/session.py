@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -29,7 +30,6 @@ class Channel:
     consumed: int = 0
     speech_windows: int = 0
     silent_windows: int = 0
-    skipped_windows: int = 0
     speech_seconds: float = 0.0
     scheduled: dict[str, int] = field(default_factory=dict)
     scores: dict[str, list[Window]] = field(default_factory=dict)
@@ -69,6 +69,8 @@ class Session:
         self.channels = [Channel(i, labels[i] if i < len(labels) else None) for i in range(nch)]
         self.specs = pool.release.catalog
         self.pending: set[asyncio.Task] = set()
+        # Queue position of this call: earlier calls are analyzed first.
+        self.job = pool.next_job()
 
     # --- ingest -----------------------------------------------------------
 
@@ -117,9 +119,6 @@ class Session:
         dets = self._due(ch)
         if not dets:
             return
-        if len(self.pending) >= self.cfg.max_backlog_windows:
-            ch.skipped_windows += 1
-            return
         for d in dets:
             ch.scheduled[d] = ch.scheduled.get(d, 0) + 1
         x16 = resample(x, self.rate)
@@ -129,7 +128,7 @@ class Session:
 
     async def _analyze(self, ch: Channel, start: float, end: float, x: np.ndarray, dets: list[str]) -> None:
         try:
-            res = await self.pool.analyze(x, dets)
+            res = await self.pool.analyze(x, dets, (self.job, ch.index, start))
         except Exception as e:  # noqa: BLE001
             for d in dets:
                 ch.errors[d] = f"{type(e).__name__}: {e}"[:300]
@@ -144,37 +143,44 @@ class Session:
     # --- finish -----------------------------------------------------------
 
     async def finish(self) -> dict:
+        """Analyze any remaining audio, wait for every queued window (no window
+        is dropped; with FINISH_TIMEOUT > 0, give up after that long), and
+        build the report."""
         for ch in self.channels:
             if ch.buffered >= self.min_win:
                 self._window(ch, self._take(ch, ch.buffered))
         notes = []
+        ended = time.monotonic()
+        queued = len(self.pending)
         api_task = asyncio.create_task(self._run_apis())
         if self.pending:
-            done, not_done = await asyncio.wait(set(self.pending), timeout=self.cfg.finish_timeout)
+            timeout = self.cfg.finish_timeout or None
+            done, not_done = await asyncio.wait(set(self.pending), timeout=timeout)
             for t in not_done:
                 t.cancel()
             if not_done:
                 notes.append(f"{len(not_done)} analysis windows did not finish within {self.cfg.finish_timeout:.0f}s.")
         api_results = await api_task
+        waited = time.monotonic() - ended
 
         reports = []
         for ch in self.channels:
             stats = {
                 "seconds_received": round(ch.consumed / self.rate + ch.buffered / self.rate, 2),
                 "speech_seconds_analyzed": round(ch.speech_seconds, 2),
-                "windows": {"speech": ch.speech_windows, "silent": ch.silent_windows,
-                            "skipped_backlog": ch.skipped_windows},
+                "windows": {"speech": ch.speech_windows, "silent": ch.silent_windows},
             }
             reports.append(channel_report(ch.index, ch.label, self.specs, ch.scores, stats,
                                           api_results.get(ch.index, {}), ch.errors))
-        if any(ch.skipped_windows for ch in self.channels):
-            notes.append("Some speech windows were skipped because analysis fell behind real time; "
-                         "add WORKERS or CPU to analyze every window.")
         audio = {"encoding": self.encoding, "sample_rate": self.rate, "channels": len(self.channels),
                  "analysis_rate": 16000, "window_seconds": self.cfg.window_seconds}
         rel = self.pool.release.summary()
         rel["detectors"] = self.pool.detectors
-        return call_report(reports, audio, rel, notes)
+        rep = call_report(reports, audio, rel, notes)
+        # How far analysis lagged the call: windows still queued when the call
+        # ended, and how long the report took after that.
+        rep["analysis"] = {"windows_queued_at_end": queued, "seconds_after_call": round(waited, 2)}
+        return rep
 
     async def _run_apis(self) -> dict[int, dict]:
         if not self.apis:

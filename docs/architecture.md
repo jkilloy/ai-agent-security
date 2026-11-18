@@ -101,7 +101,7 @@ flowchart LR
 | [`internal/plugin`](../internal/plugin/plugin.go) | The `Plugin` interface, `Input`, and the process-wide registry | `audio` |
 | [`internal/engine`](../internal/engine/engine.go) | Runs every plugin for a call: subscription, goroutines, timeout, panic recovery, result collection | `audio`, `plugin` |
 | [`internal/server`](../internal/server/ws.go) | The WebSocket call protocol, `GET /calls/{id}`, `/healthz`, and tracking in-flight calls for shutdown | `audio`, `call`, `config`, `engine`, `store` |
-| [`internal/store`](../internal/store/store.go) | Postgres: embedded migrations, save/get, expiry queries, admin list and stats queries | `call` |
+| [`internal/store`](../internal/store/store.go) | Postgres: embedded migrations, save/get, expiry queries, the admin list query | `call` |
 | [`internal/retention`](../internal/retention/cleanup.go) | Periodic deletion of expired calls and their audio | `store` |
 | [`internal/admin`](../internal/admin/admin.go) | Admin UI (embedded static files), read-only `/api`, basic auth, security headers, raw → WAV conversion | `call`, `store` |
 | [`plugins`](../plugins/all.go) | Blank imports that link each plugin into the binary | each plugin |
@@ -145,7 +145,7 @@ type Store interface {
 	Expired(ctx, now, limit) ([]Expired, error)
 	Delete(ctx, id) error
 }
-// plus (*Postgres).List(ctx, ListQuery) and (*Postgres).Stats(ctx) for the admin UI
+// plus (*Postgres).List(ctx, ListQuery) for the admin UI
 ```
 
 The server and the cleaner depend on the `Store` interface, and the admin UI on its own narrower `admin.Store`. Tests substitute in-memory fakes, so no database is needed.
@@ -172,7 +172,7 @@ CREATE INDEX IF NOT EXISTS calls_started_at_idx ON calls (started_at DESC, id); 
 ```
 
 - **One row per call, written once,** when the call ends. There are no updates. A call in progress is not in the database.
-- **`variables` and `results` are `jsonb`.** Their content is free-form by design, so no schema migration is needed when a plugin's output changes, and Postgres can still query into them. The admin filters use `results->'aivoice'->>'verdict'` and `jsonb_each(results)`.
+- **`variables` and `results` are `jsonb`.** Their content is free-form by design, so no schema migration is needed when a plugin's output changes, and Postgres can still query into them. The admin "plugin errors" filter uses `jsonb_each(results)`.
 - **Migrations** are embedded in the binary and applied in file-name order at startup. Each one is idempotent (`IF NOT EXISTS`), so there is no migrations table. Add new ones as `003_….sql`, and keep them idempotent and backward compatible, because a rolling restart runs old and new binaries against the same schema.
 
 ### 5.2 Audio files
@@ -270,7 +270,7 @@ Compose's `stop_grace_period: 90s` is longer than `SHUTDOWN_TIMEOUT` (60 s), whi
 | Plugin returns an error, panics or returns invalid JSON | engine `runOne` | That plugin's result is `{"error": …}` | none |
 | Plugin is slow or stuck | engine `Wait` timer | `{"error":"timed out…"}` after `PLUGIN_TIMEOUT` (+2 s) | none, but the save is delayed by up to the timeout |
 | Detector service down or rejecting the call | `aivoice` dial or handshake | `results.aivoice = {"error": …}` | none |
-| Detector service slow (backlog) | detector session | Windows skipped. The report counts them and adds a caveat. | none |
+| Detector service slow (backlog) | detector worker queue | Nothing is dropped: the call's report arrives later, and the call is saved only then (up to `PLUGIN_TIMEOUT`) | Later calls queue behind it |
 | Audio dir unwritable at call start | `os.OpenFile` | Rejected with 1011 | Every call fails while this lasts |
 | Disk full mid-call | Sink write in `Publish` | The call ends (`storage error`) and is saved with the audio so far | Likely affects all calls |
 | Postgres down at save | `store.Save` | **The call is lost**, closed with 1011, logged. The audio file stays on disk with no row. | All calls ending during the outage |
@@ -305,7 +305,7 @@ flowchart LR
 
 - **Why a separate service:** the detectors are PyTorch models published as Python packages, they are CPU- and memory-heavy, and they change upstream often. Keeping them out of the Go process keeps the core small and stable, lets the detectors be scaled and updated independently, and contains the risk of running upstream code (see the trust model in its README).
 - **Windowed streaming analysis:** audio is decoded (G.711 or PCM), split per channel into 4-second windows, resampled to 16 kHz, and silent windows are skipped. Each speech window is scheduled on the worker pool while the call is still going, so most analysis is done by the time the call ends.
-- **Backpressure by design:** if analysis falls behind (more than `MAX_BACKLOG_WINDOWS` queued), new windows are skipped and counted. The report stays honest about coverage instead of letting latency grow without bound.
+- **Complete analysis, queued in order:** every speech window is analyzed. Work waits in one priority queue ordered by (call start order, channel, time), so the oldest call finishes first, and within a call channel 0 is analyzed before channel 1. If the hardware can't keep up, reports are late rather than incomplete, and each report records the lag (`analysis.seconds_after_call`).
 - **Releases:** a release is a directory with its own venv (layered over the image's pinned base packages), model snapshots and a `release.json`. Workers are subprocesses of a release. A swap starts new workers, routes new calls to them, and drains the old pool, so calls in progress are not interrupted.
 - **Self-updating:** the updater checks PyPI and Hugging Face for the catalog's sources, builds a candidate, self-tests it (each watermark detector must find its own mark and not flag clean audio, including after an 8 kHz phone path), and promotes it only on a pass. Failed candidates are remembered and not retried. Rollback is a single POST.
 - **The report** combines watermark evidence (strong), classifier scores (probabilistic) and optional vendor verdicts into a per-channel and per-call `verdict` and `risk_score`, with caveats that explain the limits of the evidence.
@@ -344,7 +344,7 @@ flowchart LR
 | **Save once at the end** | Insert a row at call start and update it at the end | It is simpler, with no half-written rows. The cost is that calls in progress aren't visible and a crash loses them (see §13). |
 | **Postgres + files rather than blobs in the DB** | `bytea` audio; object storage | Audio is large and append-only and is streamed while being written, which suits files. Postgres holds the queryable part. Object storage is a natural next step (§13). |
 | **Retention via `expires_at` set at save** | Compute it from `ended_at` at query time | Per-call retention can be added later (from variables) without changing queries, and the cleanup index is direct. |
-| **Admin UI embedded, vanilla JS, no build step** | A React/Vite SPA; a separate service | One binary, one port, no Node toolchain, and a small attack surface. The UI is read-only and small enough not to need a framework. |
+| **Admin UI embedded, plain and plugin-agnostic** | A React/Vite SPA; plugin-specific views; a separate service | It is for technical observability, so it shows the stored call object as is: attributes, recording, variables and each plugin's raw JSON. Adding or removing plugins needs no UI changes. One binary, one port, no build step, and a small attack surface. |
 | **Detector service in Python, separate container** | ONNX models in Go; Python in the core image | The detectors are published as Python/PyTorch packages and track upstream releases. Re-implementing them would freeze them in time. |
 
 ## 13. Future work
@@ -371,7 +371,7 @@ Roughly in priority order:
 | WebSocket server | Full call (results, file contents, `GET /calls`); hangup still saves; bad first messages (array, null, binary, timeout) get 1008 and are not saved; ID validation | in-memory fake store |
 | Retention | Expired rows and files deleted, unexpired kept, missing files tolerated | temp dir, fake store |
 | Admin | G.711 tables against reference values, WAV conversion and seeking, format parsing, UI and API routes, paging cursor, audio Range, basic auth | fake store |
-| Store (Postgres) | List paging, search, verdict filters, stats | `TEST_DATABASE_URL` (skipped otherwise; it truncates the table) |
+| Store (Postgres) | List paging, search, plugin-error filter | `TEST_DATABASE_URL` (skipped otherwise; it truncates the table) |
 | `aivoice` | Streams audio and returns the report; defaults; missing format; service rejects or is down | fake detector service (`httptest`) |
 | Detector service | Audio decoding, report logic, session windowing, updater (promote, reject, remember), worker pool, app | pytest in the detectors image, using a dummy detector |
 | End to end | `docker compose up`, `streamcall` with generated watermarked samples, admin UI | Docker |

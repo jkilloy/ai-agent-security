@@ -23,7 +23,10 @@ class FakePool:
         self.calls = []
         self.delay = delay
 
-    async def analyze(self, x, dets):
+    def next_job(self):
+        return 0
+
+    async def analyze(self, x, dets, priority=()):
         self.calls.append((x.size, tuple(dets)))
         await asyncio.sleep(self.delay)
         s = float(np.abs(x).max())
@@ -67,15 +70,15 @@ def test_windows_strides_silence_and_report(cfg):
     assert rep["verdict"] == "watermark_detected" and rep["audio"]["sample_rate"] == 8000
 
 
-def test_backlog_skips_windows(cfg):
-    cfg.max_backlog_windows = 2
-
+def test_slow_analysis_drops_nothing(cfg):
     async def run():
-        s = Session(cfg, FakePool(delay=0.05), {}, {"encoding": "pcm16", "sample_rate": 8000})
-        s.feed(pcm16(np.full(8000 * 6, 0.5, np.float32)))
+        s = Session(cfg, FakePool(delay=0.02), {}, {"encoding": "pcm16", "sample_rate": 8000})
+        s.feed(pcm16(np.full(8000 * 40, 0.5, np.float32)))   # 40 windows queued at once
         return await s.finish()
 
     rep = asyncio.run(run())
     ch = rep["channels"][0]
-    assert ch["windows"]["skipped_backlog"] == 4
-    assert any("fell behind" in c for c in rep["caveats"])
+    assert ch["windows"] == {"speech": 40, "silent": 0}
+    assert ch["watermarks"]["wm"]["windows_analyzed"] == 40
+    assert rep["analysis"]["windows_queued_at_end"] > 0
+    assert not any("did not finish" in c for c in rep["caveats"])

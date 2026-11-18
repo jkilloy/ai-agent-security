@@ -46,8 +46,7 @@ class Config:
     window_seconds: float = 4.0
     min_window_seconds: float = 1.0
     silence_rms: float = 0.003
-    max_backlog_windows: int = 30
-    finish_timeout: float = 40.0
+    finish_timeout: float = 0.0  # 0 = wait for every queued window
     max_start_wait: float = 10.0
 
     update_enabled: bool = True
@@ -77,8 +76,7 @@ class Config:
             torch_threads=int(_env("TORCH_THREADS", "2")),
             window_seconds=parse_duration(_env("WINDOW_SECONDS", "4")),
             silence_rms=float(_env("SILENCE_RMS", "0.003")),
-            max_backlog_windows=int(_env("MAX_BACKLOG_WINDOWS", "30")),
-            finish_timeout=parse_duration(_env("FINISH_TIMEOUT", "40s")),
+            finish_timeout=parse_duration(_env("FINISH_TIMEOUT", "0")),
             update_enabled=_bool("UPDATE_ENABLED", True),
             update_interval=parse_duration(_env("UPDATE_INTERVAL", "24h")),
             releases_keep=int(_env("RELEASES_KEEP", "3")),

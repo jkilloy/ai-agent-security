@@ -8,7 +8,6 @@ The core serves the WebSocket call endpoint ([websocket-api.md](websocket-api.md
 | `GET /calls/{id}` | none | Fetch one call's variables and results (integration API) |
 | `GET /healthz` | none | Liveness and database check |
 | `GET /admin/` | admin | The admin UI |
-| `GET /api/stats` | admin | Counts for the admin dashboard |
 | `GET /api/calls` | admin | List and search calls |
 | `GET /api/calls/{id}` | admin | One call (same body as `/calls/{id}`) |
 | `GET /api/calls/{id}/audio` | admin | The call audio as WAV |
@@ -75,27 +74,7 @@ Returns 503 with `{"status":"db unavailable"}` if a database ping fails within 2
 
 ## 2. Admin API
 
-Implemented in [`internal/admin/admin.go`](../internal/admin/admin.go). It is read-only, and it is what the admin UI uses. It is a reasonable API for dashboards and exports too.
-
-### `GET /api/stats`
-
-```json
-{
-  "total": 1287,
-  "last_24h": 112,
-  "flagged": 9,
-  "errors": 2,
-  "verdicts": { "no_evidence": 1201, "insufficient_audio": 75, "likely_synthetic": 7, "watermark_detected": 2 }
-}
-```
-
-| Field | Meaning (stored, unexpired calls only) |
-|---|---|
-| `total` | All calls |
-| `last_24h` | Calls that started in the last 24 hours |
-| `flagged` | `results.aivoice.verdict` is `watermark_detected` or `likely_synthetic` |
-| `errors` | Calls where at least one plugin result is an object with an `error` key |
-| `verdicts` | Count per `results.aivoice.verdict`. Calls without an `aivoice` verdict are not counted. |
+Implemented in [`internal/admin/admin.go`](../internal/admin/admin.go). It is read-only and plugin-agnostic, and it is what the admin UI uses.
 
 ### `GET /api/calls`
 
@@ -106,10 +85,10 @@ Lists calls newest first, with cursor paging.
 | `limit` | 50 | Page size, 1–200. Out-of-range values become 50. |
 | `before` | (none) | The opaque cursor from the previous page's `next` |
 | `q` | (none) | Search, up to 200 characters. Matches a **call ID prefix**, or any text anywhere in the **variables** (case-insensitive substring of their JSON). |
-| `verdict` | (none) | `flagged`, `errors`, or one AI-voice verdict: `watermark_detected`, `likely_synthetic`, `no_evidence`, `insufficient_audio`. Anything else returns 400. |
+| `errors` | `0` | `1` keeps only calls where at least one plugin result is an object with a top-level `error` key. Values other than `1`, `true`, `0` and `false` return 400. |
 
 ```sh
-curl -s -u admin:$ADMIN_PASSWORD 'http://localhost:8080/api/calls?limit=2&verdict=flagged'
+curl -s -u admin:$ADMIN_PASSWORD 'http://localhost:8080/api/calls?limit=2&errors=1'
 ```
 
 ```json
@@ -120,10 +99,10 @@ curl -s -u admin:$ADMIN_PASSWORD 'http://localhost:8080/api/calls?limit=2&verdic
 ```
 
 - Each element of `calls` has the same shape as `GET /calls/{id}`.
-- `next` is `null` on the last page. To get the next page, pass it as `before`, with the same `q` and `verdict`.
+- `next` is `null` on the last page. To get the next page, pass it as `before`, with the same `q` and `errors`.
 - The order is `started_at DESC, id DESC`, so paging stays stable while new calls arrive.
 
-Errors: 400 `unknown verdict filter`, 400 `invalid cursor`.
+Errors: 400 `errors must be 1 or 0`, 400 `invalid cursor`.
 
 Note that the search matches the variables' JSON text, keys included. For example, `q=caller` matches every call that has a `caller` variable.
 
@@ -153,12 +132,12 @@ curl -s -u admin:$ADMIN_PASSWORD -o call.wav http://localhost:8080/api/calls/<id
 
 ## 3. The admin UI
 
-`GET /admin/` serves a single-page app embedded in the binary from [`internal/admin/static/`](../internal/admin/static/). `GET /admin` redirects there. The app uses only the `/api/*` endpoints above. Its routes are hash-based:
+`GET /admin/` serves a small, plain page for technical admins, embedded in the binary from [`internal/admin/static/`](../internal/admin/static/). `GET /admin` redirects there. The app uses only the `/api/*` endpoints above. Its routes are hash-based:
 
 | URL | Page |
 |---|---|
-| `/admin/#/` | Call list: stats, search, verdict filter, evidence strips, paging. It refreshes every 15 s. |
-| `/admin/#/calls/<id>` | Call page: verdict headline, risk, audio player, per-detector timeline, detector results, variables, other plugins and raw JSON |
+| `/admin/#/` | Call list: start time, connection time, call ID, audio bytes, variables (one line of JSON), and the plugins that returned results, with errors marked. Search, an "only calls with plugin errors" filter, a refresh button and paging. |
+| `/admin/#/calls/<id>` | Call page: the call's attributes (`id`, `started_at`, `ended_at`, `expires_at`, `audio_bytes`), the recording (player and WAV download), `variables` as JSON, each plugin's result as JSON, and the full call object |
 
 Link to a call from your own tools with `http://<core>/admin/#/calls/<call_id>`.
 

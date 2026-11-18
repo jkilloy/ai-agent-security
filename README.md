@@ -91,8 +91,10 @@ Lifecycle, rules and patterns: [docs/plugins.md](docs/plugins.md).
 
 **http://localhost:8080/admin/** is served by the core itself, embedded in the binary with no build step.
 
-- **Call list.** Shows each call's verdict, the caller, and an *evidence strip* per audio channel marking where AI-voice evidence was found. You can search by any variable or call ID, and filter by verdict or by plugin errors.
-- **Call page.** Shows a plain-language verdict, the risk score, the call audio (converted to WAV, and seekable), a per-detector timeline, detector results, variables, every other plugin's output, and the raw JSON.
+It is a plain observability page for technical admins, and it doesn't depend on any particular plugin:
+
+- **Call list.** Shows start time, call ID, audio bytes, variables, and which plugins returned results (errors marked). You can search by call ID or variables, and filter to calls with plugin errors.
+- **Call page.** Shows the call object's attributes, the recording (a player plus a WAV download), the variables, and each plugin's result as JSON.
 
 Set `ADMIN_PASSWORD` to require basic auth for `/admin/` and `/api/`. **Without it the UI is open to anyone who can reach the port.**
 

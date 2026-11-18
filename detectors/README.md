@@ -25,7 +25,7 @@ It uses two kinds of evidence:
     "channel": 0, "label": "caller",  // labels come from the channel_labels variable
     "verdict": "watermark_detected", "risk_score": 1.0,
     "seconds_received": 12.0, "speech_seconds_analyzed": 12.0,
-    "windows": {"speech": 3, "silent": 0, "skipped_backlog": 0},
+    "windows": {"speech": 3, "silent": 0},
     "watermarks": {
       "audioseal": {"detected": true, "max_score": 1.0, "windows_analyzed": 3, "windows_positive": 3,
                     "detected_seconds": 12.0, "message": "0xae20",   // AudioSeal 16-bit payload
@@ -40,7 +40,8 @@ It uses two kinds of evidence:
   }],
   "audio": {"encoding": "pcm16", "sample_rate": 8000, "channels": 1, "analysis_rate": 16000, "window_seconds": 4},
   "detectors": {"id": "base", "versions": {...}, "detectors": [...], "telephony_robust": {...}},
-  "caveats": ["..."]
+  "caveats": ["..."],
+  "analysis": {"windows_queued_at_end": 0, "seconds_after_call": 1.8}   // how far analysis lagged the call
 }
 ```
 
@@ -62,8 +63,13 @@ It uses two kinds of evidence:
 3. Each speech window is sent to a worker process:
    - Watermark detectors run on every window.
    - Slow classifiers run on every `stride`-th window, up to `max_windows` per channel.
-4. If analysis falls behind real time, more than `MAX_BACKLOG_WINDOWS` windows are queued. New windows are then skipped and counted in `skipped_backlog`. Add `WORKERS` or CPU to avoid this. On CPU, the default wav2vec2-large classifier takes about 1–5 s per window.
-5. When the call ends, the service waits up to `FINISH_TIMEOUT` for queued windows, runs any enabled APIs, and builds the report. The core's `PLUGIN_TIMEOUT` (75 s in Compose) must be longer than `FINISH_TIMEOUT` plus `API_TIMEOUT`.
+4. **No window is ever dropped.** Windows wait in one priority queue shared by all calls, and are analyzed in this order:
+   - calls in the order they started: a later call's windows run only once no earlier call has any queued;
+   - within a call, every window of channel 0 before channel 1;
+   - within a channel, in time order.
+
+   If the hardware can't keep up in real time, the queue grows and reports arrive later, but every window is analyzed. On CPU, the default wav2vec2-large classifier takes about 1–5 s per window.
+5. When the call ends, the service waits for all of that call's queued windows, runs any enabled APIs, and builds the report. `FINISH_TIMEOUT` (0 = no limit, the default) can cap this wait. The report's `analysis` field shows the lag: `windows_queued_at_end` and `seconds_after_call`. The core's `PLUGIN_TIMEOUT` (30 min in Compose) must be longer than the longest wait you expect.
 
 ## Staying up to date
 
@@ -115,8 +121,7 @@ The service is reachable only on the Compose network, not on the host. To use th
 | `WORKERS` / `TORCH_THREADS` | 2 / 2 | Worker processes, and torch threads per worker |
 | `WINDOW_SECONDS` | 4 | Analysis window length |
 | `SILENCE_RMS` | 0.003 | Windows quieter than this are skipped |
-| `MAX_BACKLOG_WINDOWS` | 30 | Queued windows per call before new ones are skipped |
-| `FINISH_TIMEOUT` | 40s | How long to wait for queued windows after the call ends |
+| `FINISH_TIMEOUT` | 0 | How long to wait for queued windows after the call ends. 0 means no limit, so every window is analyzed. |
 | `UPDATE_ENABLED` / `UPDATE_INTERVAL` | true / 24h | Upstream tracking |
 | `CATALOG_URL` | (empty) | Fetch the catalog from this URL instead of the built-in one |
 | `RELEASES_KEEP` | 3 | Releases kept for rollback |

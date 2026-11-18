@@ -36,3 +36,34 @@ def test_worker_fatal_on_bad_adapter(tmp_path):
     rel = make_release(tmp_path / "r", [{"id": "x", "kind": "watermark", "adapter": "nope"}])
     res = run_selftest_sync(rel, APP_DIR, 1)
     assert not res["passed"] and "failed to start" in res["error"]
+
+
+def test_queue_order_calls_then_channels(tmp_path):
+    """With one worker busy, queued windows run oldest call first, then channel
+    0 before channel 1, then in time order, regardless of arrival order."""
+    rel = make_release(tmp_path / "r")
+    order = []
+
+    async def run():
+        pool = Pool(rel, APP_DIR, size=1, threads=1)
+        await pool.start()
+        try:
+            a, b = pool.next_job(), pool.next_job()
+            x = np.zeros(16000, np.float32)
+
+            async def win(job, ch, t):
+                await pool.analyze(x, ["wm"], (job, ch, t))
+                order.append((job, ch, t))
+
+            blocker = asyncio.create_task(pool.analyze(x, ["wm"], (-1, 0, 0)))
+            await asyncio.sleep(0)
+            # Arrival order: interleaved across calls and channels.
+            arrivals = [(b, 0, 0.0), (a, 1, 0.0), (a, 0, 4.0), (b, 1, 0.0), (a, 0, 0.0), (a, 1, 4.0)]
+            tasks = [asyncio.create_task(win(*w)) for w in arrivals]
+            await asyncio.gather(blocker, *tasks)
+            return a, b
+        finally:
+            await pool.close()
+
+    a, b = asyncio.run(run())
+    assert order == [(a, 0, 0.0), (a, 0, 4.0), (a, 1, 0.0), (a, 1, 4.0), (b, 0, 0.0), (b, 1, 0.0)]

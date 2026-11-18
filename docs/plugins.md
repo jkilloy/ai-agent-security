@@ -83,7 +83,7 @@ Key timing facts:
 1. **Subscription happens before `accepted`.** The client can't send audio before every plugin is subscribed, so every plugin sees the call from byte 0.
 2. **`Analyze` starts immediately,** before any audio has arrived. Use the time for setup, such as opening a connection to a model server, while the frames queue up for you.
 3. **There is no deadline during the call.** A call may last up to `MAX_CALL_DURATION` (4 h by default). `ctx` is *not* cancelled when the caller hangs up; a hangup closes the stream, so you see `io.EOF` and can still finish.
-4. **After the audio ends, `PLUGIN_TIMEOUT` starts** (30 s by default, 75 s under Compose). If you haven't returned by then, `ctx` is cancelled.
+4. **After the audio ends, `PLUGIN_TIMEOUT` starts** (30 s by default, 30 min under Compose). If you haven't returned by then, `ctx` is cancelled.
 5. **Then a 2-second grace period.** A plugin that still hasn't returned is recorded as `{"error":"timed out"}` and *abandoned*: its goroutine keeps running, but its result is discarded. Don't ignore `ctx`.
 6. The call is saved only after **every** plugin has returned or been abandoned. Your slowness delays the save and the client's `complete` message, but doesn't block other plugins.
 
@@ -164,7 +164,7 @@ Return a `json.RawMessage`, usually from `json.Marshal`. The rules:
 - **It must be valid JSON.** Invalid JSON is replaced with `{"error":"plugin returned invalid JSON"}`.
 - **Any JSON value is allowed,** but **return an object.** Objects can grow new fields compatibly, and the admin UI renders them well.
 - **Returning `nil, nil` stores `null`.** Use it to mean "nothing to say". An object with an explicit status is usually clearer.
-- **The top-level `error` key is reserved.** The core, the admin UI's "plugin errors" filter, and `/api/stats` all treat a result object with an `error` key as a failure. Return an `error` value from `Analyze` for failures. Don't put `error` at the top level of a successful result. Nested keys are fine.
+- **The top-level `error` key is reserved.** The core, and the admin UI and API's "plugin errors" filter (`/api/calls?errors=1`), treat a result object with an `error` key as a failure. Return an `error` value from `Analyze` for failures. Don't put `error` at the top level of a successful result. Nested keys are fine.
 - **Keep it reasonably small.** Results are stored as `jsonb` in the same row as the call and returned by every list query in the admin API. Aim for kilobytes. Put per-frame or high-volume data elsewhere and store a reference, or summarize it, for example as segments.
 
 ### 5.1 Recommended conventions
@@ -458,7 +458,7 @@ func (p *Plugin) Analyze(ctx context.Context, in *plugin.Input) (json.RawMessage
 Points that apply to any service-backed plugin:
 
 - **Validate what you send.** Send the service only the variables it needs. `aivoice` sends the call ID and the audio-format variables, not the caller's number.
-- **Make the service's own timeouts shorter than `PLUGIN_TIMEOUT`,** so it can return a partial report instead of being cut off. The detector service's `FINISH_TIMEOUT` (40 s) plus `API_TIMEOUT` (25 s) fit inside Compose's 75 s `PLUGIN_TIMEOUT`.
+- **Size `PLUGIN_TIMEOUT` for the service's worst-case lag.** The detector service queues work rather than dropping it, so after a busy period a report can arrive minutes after the call ends. Compose sets `PLUGIN_TIMEOUT` to 30 minutes so `aivoice` can wait its turn.
 - **Writing to a slow service blocks only your goroutine.** The frames queue in your stream, not in the client's connection.
 - **Set a read limit** on responses (`conn.SetReadLimit`) that fits the largest report you expect.
 
@@ -564,21 +564,7 @@ For an end-to-end check, run the stack, stream a file with `streamcall`, and ope
 
 ## 12. How results appear in the admin UI
 
-The admin UI ([`internal/admin/static/app.js`](../internal/admin/static/app.js)) has a purpose-built view for `aivoice`. Every other plugin gets a section headed with its name, rendered generically:
-
-| Your JSON | Rendered as |
-|---|---|
-| Object | A definition list of key and value, recursively |
-| Array of scalars | A comma-separated list |
-| Array of objects with at most 8 distinct keys | A table with one column per key |
-| Anything nested more than 3 levels deep | Compact JSON |
-| Object with a top-level `error` | A red "This plugin failed: …" box |
-
-Every plugin's raw JSON is also available on the call page, under "Raw output".
-
-All values are rendered as text, never as HTML, so a plugin can't inject markup into the UI.
-
-So a flat object with readable keys and tables of segments reads well without any UI work. A custom view needs changes to `app.js`.
+The admin UI is plugin-agnostic. The call page shows each plugin's result under its name, as pretty-printed JSON, sorted by name. A result object with a top-level `error` key is marked as an error, both on the call page and in the call list. The UI needs no changes when plugins are added or removed.
 
 ## 13. Limits of the current design
 
